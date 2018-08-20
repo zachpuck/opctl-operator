@@ -1,0 +1,3 @@
+version: "1"
+domain: opctloperator.opctl.io
+repo: github.com/zachpuck/opctl-operator
