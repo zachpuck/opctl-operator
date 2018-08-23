@@ -17,22 +17,49 @@ limitations under the License.
 package v1beta1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+
+// ServiceSpec is used to define the k8s service created for a opctl node
+type ServiceSpec struct {
+	// Opctl Service Name
+	Name string `json:"name,omitempty"`
+
+	// Opctl node service type
+	ServiceType corev1.ServiceType `json:"servicetype,omitempty"`
+
+	// Opctl service annotations
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
 
 // OpctlNodeSpec defines the desired state of OpctlNode
 type OpctlNodeSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
+
+	// What container image to use for a new opctl node
+	Image string `json:"image,omitempty"`
+
+	// Dictionary of environment variable values
+	Env map[string]string `json:"env,omitempty"`
+
+	// Opctl deployment annotations
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// Opctl service options
+	Service *ServiceSpec `json:"service,omitempty"`
 }
 
 // OpctlNodeStatus defines the observed state of OpctlNode
 type OpctlNodeStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
+
+	// state if opctl node
+	Phase string `json:"phase"`
 }
 
 // +genclient

@@ -3,7 +3,17 @@ kind: OpctlNode
 metadata:
   labels:
     controller-tools.k8s.io: "1.0"
-  name: opctlnode-sample
+  name: sample-node
 spec:
   # Add fields here
-  foo: bar
+  image: "opctl/opctl:0.1.24"
+  name: operatedopctl
+  annotations:
+    opctl.io/annotations: "test"
+  env:
+    environment: dev
+  service:
+    name: opctl
+    servicetype: NodePort
+    annotations:
+      opctl.io/annotations: "test"

@@ -18,8 +18,10 @@ package opctlnode
 
 import (
 	"context"
-	"log"
-	"reflect"
+	"fmt"
+	"github.com/golang/glog"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/record"
 
 	opctlv1beta1 "github.com/zachpuck/opctl-operator/pkg/apis/opctl/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -41,6 +43,27 @@ import (
 * USER ACTION REQUIRED: This is a scaffold file intended for the user to modify with their own Controller
 * business logic.  Delete these comments after modifying this file.*
  */
+
+const (
+	// SuccessSynced is used as part of the Event 'reason' when a OpctlNode is synced
+	SuccessSynced = "Synced"
+	// ErrResourceExists is used as part of the Event 'reason' when a OpctlNode fails
+	// to sync due to a resource of the same name already existing.
+	ErrResourceExists = "ErrResourceExists"
+
+	// MessageResourceExists is the message used for Events when a resource
+	// fails to sync due to a resource already existing
+	MessageResourceExists = "Resource %q already exists and is not managed by OpctlNode"
+	// MessageResourceSynced is the message used for an Event fired when a OpctlNode
+	// is synced successfully
+	MessageResourceSynced = "OpctlNode synced successfully"
+)
+
+const (
+	OpctlNodePort       = 42224
+	OpctlNodeReplicas   = 1
+	OpctlNodePullPolicy = "Always"
+)
 
 // Add creates a new OpctlNode Controller and adds it to the Manager with default RBAC. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
@@ -78,6 +101,15 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 		return err
 	}
 
+	// Watch a Service created by OpctlNode
+	err = c.Watch(&source.Kind{Type: &corev1.Service{}}, &handler.EnqueueRequestForOwner{
+		IsController: true,
+		OwnerType:    &opctlv1beta1.OpctlNode{},
+	})
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -86,6 +118,7 @@ var _ reconcile.Reconciler = &ReconcileOpctlNode{}
 // ReconcileOpctlNode reconciles a OpctlNode object
 type ReconcileOpctlNode struct {
 	client.Client
+	record.EventRecorder
 	scheme *runtime.Scheme
 }
 
@@ -98,8 +131,8 @@ type ReconcileOpctlNode struct {
 // +kubebuilder:rbac:groups=opctl.opctloperator.opctl.io,resources=opctlnodes,verbs=get;list;watch;create;update;patch;delete
 func (r *ReconcileOpctlNode) Reconcile(request reconcile.Request) (reconcile.Result, error) {
 	// Fetch the OpctlNode instance
-	instance := &opctlv1beta1.OpctlNode{}
-	err := r.Get(context.TODO(), request.NamespacedName, instance)
+	opctlNode := &opctlv1beta1.OpctlNode{}
+	err := r.Get(context.TODO(), request.NamespacedName, opctlNode)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			// Object not found, return.  Created objects are automatically garbage collected.
@@ -110,57 +143,221 @@ func (r *ReconcileOpctlNode) Reconcile(request reconcile.Request) (reconcile.Res
 		return reconcile.Result{}, err
 	}
 
-	// TODO(user): Change this to be the object type created by your controller
-	// Define the desired Deployment object
-	deploy := &appsv1.Deployment{
+	deploy, err := r.newDeployment(opctlNode)
+	// If an error occurs during Get/Create, we'll requeue the item so we can
+	// attempt processing again later. This could bave been caused by a
+	// temporary network failure, or any other transient reason.
+	if err != nil {
+		glog.Errorf("Error creating deployment: %s", err)
+		return reconcile.Result{}, err
+	}
+
+	service, err := r.newService(opctlNode)
+	// If an error occurs during Get/Create, we'll requeue the item so we can
+	// attempt processing again later. This could have been caused by a
+	// temporary network failure, or any other transient reason.
+	if err != nil {
+		glog.Errorf("Error creating service: %s", err)
+		return reconcile.Result{}, err
+	}
+
+	// Finally, we update the status block of the OpctlNode resource to reflect the
+	// current state of the world
+	// fmt.Println(deploy, service)
+	err = r.updateOpctlNodeStatus(opctlNode, deploy, service)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+
+	// r.Event(opctlNode, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
+
+	return reconcile.Result{}, nil
+}
+
+// update status fields of the opctl node object and emit events
+func (r *ReconcileOpctlNode) updateOpctlNodeStatus(opctlNode *opctlv1beta1.OpctlNode, deployment *appsv1.Deployment, service *corev1.Service) error {
+	// func (r *ReconcileOpctlNode) updateOpctlNodeStatus(opctlNode *opctlv1beta1.OpctlNode) error {
+	// NEVER modify objects from the store. It's a read-only, local cache.
+	// You can use DeepCopy() to make a deep copy of original object and modify this copy
+	// Or create a copy manually for better performance
+	opctlNodeCopy := opctlNode.DeepCopy()
+
+	// TODO: update other status fields (ex: apiEndpoint)
+	opctlNodeCopy.Status.Phase = "Ready"
+
+	// update the Status block of the OpctlNode resource
+	var err error
+	err = r.Client.Update(context.TODO(), opctlNodeCopy)
+	return err
+}
+
+// newDeployment creates a new Deployment for an OpctlNode resource. It also sets
+// the appropriate OwnerReferences on the resource so handleObject can discover
+// the OpctlNode resource that 'owns' it.
+func (r *ReconcileOpctlNode) newDeployment(opctlNode *opctlv1beta1.OpctlNode) (*appsv1.Deployment, error) {
+	// Get the deployment with the name specified in OpctlNode.spec
+	deployment := &appsv1.Deployment{}
+	err := r.Client.Get(
+		context.TODO(), types.NewNamespacedNameFromString(
+			fmt.Sprintf("%s%c%s", opctlNode.GetNamespace(), types.Separator,
+				opctlNode.GetName())),
+		deployment)
+
+	// if the resource doesn't exist, we'll create it
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			return nil, err
+		}
+	} else {
+		// if the Deployment is not controlled by this OpctlNode resource, we should log
+		// a warning to the event recorder and return
+		if !metav1.IsControlledBy(deployment, opctlNode) {
+			msg := fmt.Sprintf(MessageResourceExists, deployment.GetName())
+			r.Event(opctlNode, corev1.EventTypeWarning, ErrResourceExists, msg)
+			return deployment, fmt.Errorf(msg)
+		}
+
+		return deployment, nil
+	}
+
+	labels := map[string]string{
+		"app":        "opctl",
+		"controller": opctlNode.GetName(),
+		"component":  string(opctlNode.UID),
+	}
+
+	// create environment variables
+	var env []corev1.EnvVar
+
+	// create security context variable
+	privilegedContainer := true
+	securityContext := &corev1.SecurityContext{
+		Privileged: &privilegedContainer,
+	}
+
+	var replicas int32 = OpctlNodeReplicas
+	deployment = &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      instance.Name + "-deployment",
-			Namespace: instance.Namespace,
+			Name:        opctlNode.GetName(),
+			Namespace:   opctlNode.GetNamespace(),
+			Annotations: opctlNode.Spec.Annotations,
 		},
 		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{"deployment": instance.Name + "-deployment"},
+				MatchLabels: labels,
 			},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"deployment": instance.Name + "-deployment"}},
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels,
+				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:  "nginx",
-							Image: "nginx",
+							Name:  "opctl",
+							Image: opctlNode.Spec.Image,
+							Ports: []corev1.ContainerPort{
+								{
+									Name:          "node",
+									ContainerPort: OpctlNodePort,
+									HostPort:      OpctlNodePort,
+									Protocol:      "TCP",
+								},
+							},
+							Env:             env,
+							ImagePullPolicy: OpctlNodePullPolicy,
+							// TODO: How can we have opctl not need privilaged access? (possible run k8s jobs instead of container?)
+							SecurityContext: securityContext,
 						},
 					},
 				},
 			},
 		},
 	}
-	if err := controllerutil.SetControllerReference(instance, deploy, r.scheme); err != nil {
-		return reconcile.Result{}, err
+
+	err = controllerutil.SetControllerReference(opctlNode, deployment, r.scheme)
+	if err != nil {
+		return nil, err
 	}
 
-	// TODO(user): Change this for the object type created by your controller
-	// Check if the Deployment already exists
-	found := &appsv1.Deployment{}
-	err = r.Get(context.TODO(), types.NamespacedName{Name: deploy.Name, Namespace: deploy.Namespace}, found)
-	if err != nil && errors.IsNotFound(err) {
-		log.Printf("Creating Deployment %s/%s\n", deploy.Namespace, deploy.Name)
-		err = r.Create(context.TODO(), deploy)
-		if err != nil {
-			return reconcile.Result{}, err
+	err = r.Client.Create(context.TODO(), deployment)
+	return deployment, err
+}
+
+// newService creates a new Service for an OpctlNode resource. It also sets
+// the appropriate OwnerReferences on the resource so handleObject can discover
+// the OpctlNode resources that 'owns' it.
+func (r *ReconcileOpctlNode) newService(opctlNode *opctlv1beta1.OpctlNode) (*corev1.Service, error) {
+	// Get the service with the name specified in OpctlNode.spec
+	serviceName := opctlNode.GetName()
+	if opctlNode.Spec.Service != nil && opctlNode.Spec.Service.Name != "" {
+		serviceName = opctlNode.Spec.Service.Name
+	}
+	service := &corev1.Service{}
+	err := r.Client.Get(
+		context.TODO(),
+		types.NewNamespacedNameFromString(
+			fmt.Sprintf("%s%c%s", opctlNode.GetNamespace(), types.Separator, serviceName)),
+		service)
+	// If the resource doesn't exist, we'll create it
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			return nil, err
 		}
-	} else if err != nil {
-		return reconcile.Result{}, err
+	} else {
+		// If the Service is not controlled by this OpctlNode resource, we should log
+		// a warning to the event recorder and return
+		if !metav1.IsControlledBy(service, opctlNode) {
+			msg := fmt.Sprintf(MessageResourceExists, service.GetName())
+			r.Event(opctlNode, corev1.EventTypeWarning, ErrResourceExists, msg)
+			return service, fmt.Errorf(msg)
+		}
+
+		return service, nil
 	}
 
-	// TODO(user): Change this for the object type created by your controller
-	// Update the found object and write the result back if there are any changes
-	if !reflect.DeepEqual(deploy.Spec, found.Spec) {
-		found.Spec = deploy.Spec
-		log.Printf("Updating Deployment %s/%s\n", deploy.Namespace, deploy.Name)
-		err = r.Update(context.TODO(), found)
-		if err != nil {
-			return reconcile.Result{}, err
+	labels := map[string]string{
+		"app":        "opctl",
+		"controller": opctlNode.GetName(),
+		"component":  string(opctlNode.UID),
+	}
+
+	service = &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      serviceName,
+			Namespace: opctlNode.GetNamespace(),
+			Labels:    labels,
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
+				{
+					Name:     "node",
+					Protocol: "TCP",
+					Port:     OpctlNodePort,
+					TargetPort: intstr.IntOrString{
+						Type:   intstr.Int,
+						IntVal: OpctlNodePort,
+					},
+				},
+			},
+			Selector: map[string]string{
+				"component": string(opctlNode.UID),
+			},
+		},
+	}
+
+	if opctlNode.Spec.Service != nil {
+		service.ObjectMeta.Annotations = opctlNode.Spec.Service.Annotations
+		if opctlNode.Spec.Service.ServiceType != "" {
+			service.Spec.Type = opctlNode.Spec.Service.ServiceType
 		}
 	}
-	return reconcile.Result{}, nil
+
+	err = controllerutil.SetControllerReference(opctlNode, service, r.scheme)
+	if err != nil {
+		return nil, err
+	}
+
+	err = r.Client.Create(context.TODO(), service)
+	return service, nil
 }

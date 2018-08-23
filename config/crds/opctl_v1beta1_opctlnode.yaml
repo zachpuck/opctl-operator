@@ -21,8 +21,29 @@ spec:
         metadata:
           type: object
         spec:
+          properties:
+            annotations:
+              type: object
+            env:
+              type: object
+            image:
+              type: string
+            service:
+              properties:
+                annotations:
+                  type: object
+                name:
+                  type: string
+                servicetype:
+                  type: string
+              type: object
           type: object
         status:
+          properties:
+            phase:
+              type: string
+          required:
+          - phase
           type: object
       type: object
   version: v1beta1
